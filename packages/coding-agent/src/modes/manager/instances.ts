@@ -19,6 +19,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getAgentDir } from "../../config.ts";
+import { generateInstanceName } from "./instance-names.ts";
 import type { PimStatusFile } from "./pim-status-extension.ts";
 
 const TMUX_SOCKET_NAME = "pim";
@@ -27,12 +28,12 @@ const TMUX_SESSION_PREFIX = "pim_";
 export interface InstanceWorktree {
 	/** Absolute path of the worktree checkout the instance runs in. */
 	path: string;
-	/** Branch created for the instance (pim/<slug>). */
+	/** Branch checked out in the worktree (pim/<slug> when pim created it). */
 	branch: string;
-	/** Main repository root the worktree was created from. */
+	/** Main repository root the worktree belongs to. */
 	repoRoot: string;
-	/** Branch the main checkout was on when the worktree was created. */
-	baseBranch: string;
+	/** Branch the main checkout was on when the worktree was created (if known). */
+	baseBranch?: string;
 }
 
 export interface InstanceRecord {
@@ -40,6 +41,8 @@ export interface InstanceRecord {
 	name: string;
 	cwd: string;
 	createdAt: string;
+	/** Project the instance belongs to: git repo root of the spawn cwd, else the cwd itself. */
+	projectRoot: string;
 	/** Model pattern passed to the instance at spawn, if any. */
 	model?: string;
 	initialTask?: string;
@@ -51,6 +54,10 @@ export type InstanceState = "starting" | "working" | "idle" | "exited";
 export interface InstanceView extends InstanceRecord {
 	state: InstanceState;
 	status?: PimStatusFile;
+	/** Branch currently checked out in the instance's directory (agents may switch branches). */
+	liveBranch?: string;
+	/** The agent finished a response the user hasn't looked at yet (attach/history clear it). */
+	unseenDone?: boolean;
 }
 
 interface RegistryFile {
@@ -89,7 +96,13 @@ export function loadInstances(): InstanceRecord[] {
 	try {
 		const raw = readFileSync(getRegistryPath(), "utf8");
 		const parsed = JSON.parse(raw) as RegistryFile;
-		return Array.isArray(parsed.instances) ? parsed.instances : [];
+		const instances = Array.isArray(parsed.instances) ? parsed.instances : [];
+		// Records written before project scoping lack projectRoot; derive it.
+		return instances.map((instance) =>
+			instance.projectRoot
+				? instance
+				: { ...instance, projectRoot: instance.worktree?.repoRoot ?? gitRepoRoot(instance.cwd) ?? instance.cwd },
+		);
 	} catch {
 		return [];
 	}
@@ -212,9 +225,44 @@ function buildInstanceCommand(record: InstanceRecord): string {
 	return [...envPrefix, "exec", ...[...nodeParts, ...piArgs].map(shellQuote)].join(" ");
 }
 
+const repoRootCache = new Map<string, string | undefined>();
+
 export function gitRepoRoot(cwd: string): string | undefined {
+	if (repoRootCache.has(cwd)) {
+		return repoRootCache.get(cwd);
+	}
 	const result = runGit(cwd, ["rev-parse", "--show-toplevel"]);
-	return result.ok ? result.stdout : undefined;
+	const root = result.ok ? result.stdout : undefined;
+	repoRootCache.set(cwd, root);
+	return root;
+}
+
+/** The scoping key for "this project": git repo root if inside one, else the cwd. */
+export function projectRootFor(cwd: string): string {
+	return gitRepoRoot(cwd) ?? cwd;
+}
+
+export interface WorktreeInfo {
+	path: string;
+	branch: string;
+}
+
+/** All linked worktrees of a repo (excluding the main checkout). */
+export function listWorktrees(repoRoot: string): WorktreeInfo[] {
+	const result = runGit(repoRoot, ["worktree", "list", "--porcelain"]);
+	if (!result.ok) {
+		return [];
+	}
+	const worktrees: WorktreeInfo[] = [];
+	let currentPath: string | undefined;
+	for (const line of result.stdout.split("\n")) {
+		if (line.startsWith("worktree ")) {
+			currentPath = line.slice("worktree ".length).trim();
+		} else if (line.startsWith("branch refs/heads/") && currentPath && currentPath !== repoRoot) {
+			worktrees.push({ path: currentPath, branch: line.slice("branch refs/heads/".length).trim() });
+		}
+	}
+	return worktrees;
 }
 
 function slugify(name: string): string {
@@ -241,34 +289,48 @@ function createWorktree(repoRoot: string, name: string, id: string): InstanceWor
 	return { path: worktreePath, branch, repoRoot, baseBranch };
 }
 
+export type WorktreeChoice = { create: string } | { existingPath: string };
+
 export interface SpawnInstanceOptions {
 	name?: string;
 	cwd: string;
 	initialPrompt?: string;
 	model?: string;
-	useWorktree?: boolean;
+	worktree?: WorktreeChoice;
 	cols?: number;
 	rows?: number;
 }
 
+function resolveWorktree(options: SpawnInstanceOptions, name: string, id: string): InstanceWorktree | undefined {
+	if (!options.worktree) {
+		return undefined;
+	}
+	const repoRoot = gitRepoRoot(options.cwd);
+	if (!repoRoot) {
+		throw new Error(`Cannot use a worktree: ${options.cwd} is not inside a git repository.`);
+	}
+	if ("create" in options.worktree) {
+		return createWorktree(repoRoot, options.worktree.create.trim() || name, id);
+	}
+	const existingPath = options.worktree.existingPath;
+	const branch = runGit(existingPath, ["rev-parse", "--abbrev-ref", "HEAD"]);
+	if (!branch.ok) {
+		throw new Error(`Not a usable worktree: ${existingPath}`);
+	}
+	return { path: existingPath, branch: branch.stdout, repoRoot };
+}
+
 export function spawnInstance(options: SpawnInstanceOptions): InstanceRecord {
 	const id = randomBytes(3).toString("hex");
-	const name = options.name?.trim() || `agent-${id}`;
-
-	let worktree: InstanceWorktree | undefined;
-	if (options.useWorktree) {
-		const repoRoot = gitRepoRoot(options.cwd);
-		if (!repoRoot) {
-			throw new Error(`Cannot create a worktree: ${options.cwd} is not inside a git repository.`);
-		}
-		worktree = createWorktree(repoRoot, name, id);
-	}
+	const name = options.name?.trim() || generateInstanceName(new Set(loadInstances().map((instance) => instance.name)));
+	const worktree = resolveWorktree(options, name, id);
 
 	const record: InstanceRecord = {
 		id,
 		name,
 		cwd: worktree?.path ?? options.cwd,
 		createdAt: new Date().toISOString(),
+		projectRoot: worktree?.repoRoot ?? projectRootFor(options.cwd),
 		model: options.model?.trim() || undefined,
 		initialTask: options.initialPrompt?.trim() || undefined,
 		worktree,
@@ -328,6 +390,34 @@ export function capturePane(id: string): string {
 	return result.stdout.replace(/\s+$/, "");
 }
 
+/**
+ * The instance's rendered scrollback (with colors), for browsing its history
+ * inside the manager. Returns undefined when the session is not running.
+ */
+export function capturePaneHistory(id: string, maxLines = 3000): string[] | undefined {
+	const result = runTmux(["capture-pane", "-p", "-e", "-q", "-t", tmuxSessionName(id), "-S", `-${maxLines}`]);
+	if (!result.ok) {
+		return undefined;
+	}
+	const lines = result.stdout.split("\n");
+	while (lines.length > 0 && lines[lines.length - 1].trim() === "") {
+		lines.pop();
+	}
+	// Skip the leading blank region of an un-filled scrollback.
+	let start = 0;
+	while (start < lines.length && lines[start].trim() === "") {
+		start++;
+	}
+	return lines.slice(start);
+}
+
+/** Directory holding per-instance status files; watch it for realtime updates. */
+export function getStatusDir(): string {
+	const dir = join(getPimDir(), "status");
+	mkdirSync(dir, { recursive: true });
+	return dir;
+}
+
 export interface MergeResult {
 	ok: boolean;
 	branch: string;
@@ -360,6 +450,48 @@ export function mergeInstanceBranch(record: InstanceRecord): MergeResult {
 	};
 }
 
+/**
+ * Current branch of a directory, cached briefly: views refresh at watch speed
+ * (many times per second), while branch switches are rare.
+ */
+const BRANCH_CACHE_TTL_MS = 5000;
+const branchCache = new Map<string, { branch: string | undefined; at: number }>();
+
+function currentBranch(cwd: string): string | undefined {
+	const cached = branchCache.get(cwd);
+	if (cached && Date.now() - cached.at < BRANCH_CACHE_TTL_MS) {
+		return cached.branch;
+	}
+	const result = runGit(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
+	const branch = result.ok ? result.stdout : undefined;
+	branchCache.set(cwd, { branch, at: Date.now() });
+	return branch;
+}
+
+/**
+ * Per-instance "last looked at" timestamps, persisted so the done-notifier
+ * survives manager restarts. Attaching or opening history marks an instance
+ * seen; a finish newer than that shows the ✦ badge.
+ */
+function getSeenPath(): string {
+	return join(getPimDir(), "seen.json");
+}
+
+function loadSeen(): Record<string, string> {
+	try {
+		return JSON.parse(readFileSync(getSeenPath(), "utf8")) as Record<string, string>;
+	} catch {
+		return {};
+	}
+}
+
+export function markInstanceSeen(id: string): void {
+	const seen = loadSeen();
+	seen[id] = new Date().toISOString();
+	mkdirSync(getPimDir(), { recursive: true });
+	writeFileSync(getSeenPath(), JSON.stringify(seen), "utf8");
+}
+
 function readStatusFile(id: string): PimStatusFile | undefined {
 	try {
 		return JSON.parse(readFileSync(getStatusFilePath(id), "utf8")) as PimStatusFile;
@@ -368,19 +500,27 @@ function readStatusFile(id: string): PimStatusFile | undefined {
 	}
 }
 
-export function getInstanceViews(): InstanceView[] {
+export function getInstanceViews(filter?: { projectRoot?: string }): InstanceView[] {
 	const liveSessions = listLiveTmuxSessions();
-	const views = loadInstances().map((record): InstanceView => {
+	const records = filter?.projectRoot
+		? loadInstances().filter((record) => record.projectRoot === filter.projectRoot)
+		: loadInstances();
+	const seen = loadSeen();
+	const views = records.map((record): InstanceView => {
 		if (!liveSessions.has(tmuxSessionName(record.id))) {
 			return { ...record, state: "exited" };
 		}
+		const liveBranch = currentBranch(record.cwd);
 		const status = readStatusFile(record.id);
 		if (!status || status.state === "exited") {
 			// Session is alive but the agent has not reported yet (still booting)
 			// or is shutting down.
-			return { ...record, state: "starting", status };
+			return { ...record, state: "starting", status, liveBranch };
 		}
-		return { ...record, state: status.state, status };
+		const seenAt = seen[record.id];
+		const unseenDone =
+			status.state === "idle" && status.finishedAt !== undefined && (!seenAt || status.finishedAt > seenAt);
+		return { ...record, state: status.state, status, liveBranch, unseenDone };
 	});
 	return views.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }

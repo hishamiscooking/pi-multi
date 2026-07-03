@@ -6,6 +6,7 @@
 
 - Added public SDK exports for CLI-equivalent model and scoped-model resolution ([#6201](https://github.com/earendil-works/pi/issues/6201)).
 - Added extension entry renderers for persisted display-only session entries that are rendered in interactive mode without being sent to the model context.
+- Added `pi manager` (pim): a tmux-backed multi-instance agent manager. Live card grid (columns/height scale with the terminal) showing state, model, context bar, token/cost totals, current branch, and a streaming run-transcript preview; dot-matrix status indicators on a braille pixel canvas (infinity while working, red X for blocked, drawing-in `?` for question, checkmark for unseen-done); per-project scoping with an all-projects toggle; git-worktree workspaces with custom names, reuse, and merge-back; an in-manager scrollable history browser; agent-raised attention flags via a `pim_set_state` tool; generated adjective-animal instance names; near-realtime updates via status-file watching; a spinner gallery (`pi manager spinners`); and a headless CLI API (`status`, `spawn`, `send`, `peek`, `log`, `attach`, `merge`, `kill`) for external tooling and orchestrator agents. See [docs/manager.md](docs/manager.md).
 
 ### Fixed
 

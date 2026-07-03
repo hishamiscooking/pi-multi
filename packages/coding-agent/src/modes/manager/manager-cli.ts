@@ -23,24 +23,29 @@ import {
 	getLogFilePath,
 	type InstanceRecord,
 	type InstanceView,
+	markInstanceSeen,
 	mergeInstanceBranch,
+	projectRootFor,
 	removeInstance,
 	sendPrompt,
 	spawnInstance,
 	tmuxAttachArgs,
 	tmuxAvailable,
+	type WorktreeChoice,
 } from "./instances.ts";
+import { runSpinnerGallery } from "./spinner-gallery.ts";
 
 const HELP = `pi manager — multi-instance agent manager
 
 Usage:
   pi manager                          Open the manager TUI
-  pi manager status [--json]          Show all instances and their state
+  pi manager status [--all] [--json]  Show instances for this project (--all: every project)
   pi manager spawn [options]          Spawn a detached instance
       --name <name>                   Instance name
       --task <text>                   Initial task prompt
       --model <pattern>               Model pattern (e.g. sonnet, openai/gpt-5)
-      --worktree                      Run in an isolated git worktree
+      --worktree [name]               Run in a new isolated git worktree (branch pim/<name>)
+      --worktree-path <path>          Run in an existing worktree checkout
       --cwd <dir>                     Working directory (default: current)
       --json                          Print the created instance as JSON
   pi manager send <id|name> <text>    Submit a prompt to an instance
@@ -50,6 +55,7 @@ Usage:
   pi manager merge <id|name>          Merge the instance's worktree branch into
                                       the branch checked out in the main repo
   pi manager kill <id|name>           Kill an instance (worktree is kept)
+  pi manager spinners                 Browse candidate status animations (live)
 `;
 
 function fail(message: string): never {
@@ -76,20 +82,25 @@ function describeView(view: InstanceView): string {
 		(view.status?.model ?? view.model ?? "-").padEnd(28),
 		view.worktree ? `⎇ ${view.worktree.branch}` : formatInstanceCwd(view.cwd),
 	];
-	if (view.state === "working" && view.status?.activity) {
+	const attention = view.status?.attention;
+	if (attention) {
+		parts.push(`| ${attention.kind === "blocked" ? "BLOCKED" : "QUESTION"}: ${attention.note}`);
+	} else if (view.state === "working" && view.status?.activity) {
 		parts.push(`| ${view.status.activity}`);
 	}
 	return parts.join("  ");
 }
 
 function commandStatus(flags: Set<string>): void {
-	const views = getInstanceViews();
+	const views = getInstanceViews(flags.has("--all") ? undefined : { projectRoot: projectRootFor(process.cwd()) });
 	if (flags.has("--json")) {
 		console.log(JSON.stringify(views, undefined, 2));
 		return;
 	}
 	if (views.length === 0) {
-		console.log("No instances. Spawn one with: pi manager spawn --name my-agent --task '...'");
+		console.log(
+			"No instances in this project. Spawn one with: pi manager spawn --name my-agent --task '...' (or use --all)",
+		);
 		return;
 	}
 	for (const view of views) {
@@ -97,29 +108,32 @@ function commandStatus(flags: Set<string>): void {
 	}
 }
 
-function parseSpawnArgs(args: string[]): {
+interface SpawnCliOptions {
 	name?: string;
 	task?: string;
 	model?: string;
 	cwd: string;
-	useWorktree: boolean;
+	worktree?: WorktreeChoice;
 	json: boolean;
-} {
-	const result = { cwd: process.cwd(), useWorktree: false, json: false } as {
-		name?: string;
-		task?: string;
-		model?: string;
-		cwd: string;
-		useWorktree: boolean;
-		json: boolean;
-	};
+}
+
+function parseSpawnArgs(args: string[]): SpawnCliOptions {
+	const result: SpawnCliOptions = { cwd: process.cwd(), json: false };
 	for (let i = 0; i < args.length; i++) {
 		const arg = args[i];
 		if (arg === "--name" && i + 1 < args.length) result.name = args[++i];
 		else if (arg === "--task" && i + 1 < args.length) result.task = args[++i];
 		else if (arg === "--model" && i + 1 < args.length) result.model = args[++i];
 		else if (arg === "--cwd" && i + 1 < args.length) result.cwd = args[++i];
-		else if (arg === "--worktree") result.useWorktree = true;
+		else if (arg === "--worktree") {
+			const next = args[i + 1];
+			if (next !== undefined && !next.startsWith("--")) {
+				result.worktree = { create: next };
+				i++;
+			} else {
+				result.worktree = { create: "" };
+			}
+		} else if (arg === "--worktree-path" && i + 1 < args.length) result.worktree = { existingPath: args[++i] };
 		else if (arg === "--json") result.json = true;
 		else fail(`Unknown spawn option: ${arg}`);
 	}
@@ -133,7 +147,7 @@ function commandSpawn(args: string[]): void {
 		cwd: options.cwd,
 		initialPrompt: options.task,
 		model: options.model,
-		useWorktree: options.useWorktree,
+		worktree: options.worktree,
 	});
 	if (options.json) {
 		console.log(JSON.stringify(record, undefined, 2));
@@ -170,6 +184,7 @@ async function commandAttach(idOrName: string | undefined): Promise<void> {
 		child.on("error", () => resolve());
 		child.on("close", () => resolve());
 	});
+	markInstanceSeen(record.id);
 }
 
 function commandMerge(idOrName: string | undefined): void {
@@ -229,6 +244,9 @@ export async function runManagerCli(args: string[]): Promise<void> {
 			);
 			return;
 		}
+		case "spinners":
+			await runSpinnerGallery();
+			return;
 		case "help":
 		case "--help":
 		case "-h":

@@ -1,13 +1,19 @@
 /**
  * pim manager mode: a control surface for spawning and managing multiple pi
- * instances. Instances are full interactive pi processes in detached tmux
- * sessions on a private tmux server, so they keep running while detached and
- * survive manager restarts. Attaching hands the terminal to the instance;
- * ctrl+q detaches back to the manager. Instances can run in isolated git
- * worktrees for conflict-free parallel work.
+ * instances, scoped per project. Instances are full interactive pi processes
+ * in detached tmux sessions on a private tmux server, so they keep running
+ * while detached and survive manager restarts. Attaching hands the terminal
+ * to the instance; ctrl+q detaches back to the manager. Instances can run in
+ * isolated git worktrees for conflict-free parallel work.
+ *
+ * The board refreshes in near-realtime by watching the status directory that
+ * instances write telemetry into (a slow interval remains as fallback for
+ * tmux liveness and age labels). `h` swaps the board for a scrollable view of
+ * the selected instance's rendered history. See docs/manager.md.
  */
 
 import { spawn } from "node:child_process";
+import { type FSWatcher, watch } from "node:fs";
 import { type SelectItem, Text } from "@earendil-works/pi-tui";
 import chalk from "chalk";
 import { createStartupTui, startStartupTui } from "../../cli/startup-ui.ts";
@@ -18,16 +24,24 @@ import { SettingsManager } from "../../core/settings-manager.ts";
 import { ExtensionInputComponent } from "../interactive/components/extension-input.ts";
 import { stopThemeWatcher, theme } from "../interactive/theme/theme.ts";
 import {
+	capturePaneHistory,
+	formatInstanceCwd,
 	getInstanceViews,
+	getStatusDir,
 	gitRepoRoot,
 	type InstanceView,
+	listWorktrees,
+	markInstanceSeen,
 	mergeInstanceBranch,
+	projectRootFor,
 	removeInstance,
 	spawnInstance,
 	tmuxAttachArgs,
 	tmuxAvailable,
+	type WorktreeChoice,
 } from "./instances.ts";
 import { ManagerComponent } from "./manager-component.ts";
+import { ManagerHistoryComponent } from "./manager-history.ts";
 import { ManagerSelectComponent } from "./manager-select.ts";
 
 const REFRESH_INTERVAL_MS = 1000;
@@ -74,26 +88,72 @@ export async function runManagerMode(): Promise<void> {
 	}
 
 	const cwd = process.cwd();
+	const projectRoot = projectRootFor(cwd);
 	const settingsManager = SettingsManager.create(cwd, getAgentDir());
 	const ui = await createStartupTui(settingsManager);
 	const statusLine = new Text("", 1, 0);
 
 	let refreshTimer: NodeJS.Timeout | undefined;
+	let statusWatcher: FSWatcher | undefined;
 	let busy = false;
+	let showAll = false;
+	let history: { component: ManagerHistoryComponent; instanceId: string } | undefined;
 
 	const refresh = () => {
-		manager.setInstances(getInstanceViews());
+		if (history) {
+			history.component.setLines(capturePaneHistory(history.instanceId));
+		} else {
+			manager.setInstances(getInstanceViews(showAll ? undefined : { projectRoot }));
+		}
 		ui.requestRender();
 	};
+
+	// Event-driven refresh: instances write status files on every agent event,
+	// so watching the status dir makes state changes appear near-instantly.
+	// A slower interval remains as fallback (tmux liveness, age labels).
+	let lastRefresh = 0;
+	let refreshQueued = false;
+	const REFRESH_THROTTLE_MS = 80;
+	const requestRefresh = () => {
+		if (busy) return;
+		const elapsed = Date.now() - lastRefresh;
+		if (elapsed >= REFRESH_THROTTLE_MS) {
+			lastRefresh = Date.now();
+			refresh();
+		} else if (!refreshQueued) {
+			refreshQueued = true;
+			setTimeout(() => {
+				refreshQueued = false;
+				lastRefresh = Date.now();
+				refresh();
+			}, REFRESH_THROTTLE_MS - elapsed);
+		}
+	};
+
 	const startPolling = () => {
 		refreshTimer = setInterval(refresh, REFRESH_INTERVAL_MS);
+		try {
+			statusWatcher = watch(getStatusDir(), { persistent: false }, () => requestRefresh());
+		} catch {
+			// fs.watch is best-effort; the interval still refreshes.
+		}
 	};
 	const stopPolling = () => {
 		if (refreshTimer) {
 			clearInterval(refreshTimer);
 			refreshTimer = undefined;
 		}
+		statusWatcher?.close();
+		statusWatcher = undefined;
 	};
+
+	// The status indicator sweep animates off wall-clock time; while any agent
+	// is working (or starting), repaint fast enough for it to look alive.
+	const SPINNER_TICK_MS = 140;
+	setInterval(() => {
+		if (busy || history || !manager.hasAnimatedInstances()) return;
+		requestRefresh();
+	}, SPINNER_TICK_MS);
 	const setStatus = (message: string) => {
 		statusLine.setText(message);
 		ui.requestRender();
@@ -151,6 +211,7 @@ export async function runManagerMode(): Promise<void> {
 		stopPolling();
 		ui.stop();
 		await runTmuxAttach(instance.id);
+		markInstanceSeen(instance.id);
 		ui.start();
 		ui.requestRender(true);
 		startPolling();
@@ -184,18 +245,26 @@ export async function runManagerMode(): Promise<void> {
 			model = choice.value || undefined;
 		}
 
-		let useWorktree = false;
+		let worktree: WorktreeChoice | undefined;
 		if (gitRepoRoot(cwd)) {
+			const existing = listWorktrees(projectRoot).map((info) => ({
+				value: `wt:${info.path}`,
+				label: `⎇ ${info.branch}`,
+				description: formatInstanceCwd(info.path),
+			}));
 			const choice = await promptSelect("Workspace", [
 				{ value: "cwd", label: "Current directory", description: "shares files with other agents here" },
-				{
-					value: "worktree",
-					label: "New git worktree",
-					description: "isolated branch pim/<name>, merge back later",
-				},
+				{ value: "new", label: "New git worktree…", description: "isolated branch, merge back later" },
+				...existing,
 			]);
 			if (choice === undefined) return cancel();
-			useWorktree = choice.value === "worktree";
+			if (choice.value === "new") {
+				const worktreeName = await promptInput(`Worktree name (enter for "${name.trim() || "instance name"}")`);
+				if (worktreeName === undefined) return cancel();
+				worktree = { create: worktreeName.trim() || name };
+			} else if (choice.value.startsWith("wt:")) {
+				worktree = { existingPath: choice.value.slice(3) };
+			}
 		}
 
 		startPolling();
@@ -207,7 +276,7 @@ export async function runManagerMode(): Promise<void> {
 				cwd,
 				initialPrompt: task.trim() || undefined,
 				model,
-				useWorktree,
+				worktree,
 				cols,
 				rows,
 			});
@@ -218,6 +287,29 @@ export async function runManagerMode(): Promise<void> {
 			const message = error instanceof Error ? error.message : String(error);
 			setStatus(theme.fg("error", message));
 		}
+	};
+
+	const closeHistory = () => {
+		if (!history) return;
+		ui.removeChild(history.component);
+		history = undefined;
+		ui.addChild(manager);
+		ui.addChild(statusLine);
+		ui.setFocus(manager);
+		refresh();
+		ui.requestRender(true);
+	};
+
+	const openHistory = (instance: InstanceView) => {
+		if (busy || history) return;
+		markInstanceSeen(instance.id);
+		const component = new ManagerHistoryComponent(instance, capturePaneHistory(instance.id), closeHistory);
+		history = { component, instanceId: instance.id };
+		ui.removeChild(manager);
+		ui.removeChild(statusLine);
+		ui.addChild(component);
+		ui.setFocus(component);
+		ui.requestRender(true);
 	};
 
 	const merge = (instance: InstanceView) => {
@@ -247,7 +339,7 @@ export async function runManagerMode(): Promise<void> {
 		process.exit(0);
 	};
 
-	const manager = new ManagerComponent(cwd, {
+	const manager = new ManagerComponent(projectRoot, {
 		onAttach: (instance) => void attach(instance),
 		onNew: () => void spawnFlow(),
 		onKill: (instance) => {
@@ -255,6 +347,12 @@ export async function runManagerMode(): Promise<void> {
 			refresh();
 		},
 		onMerge: merge,
+		onHistory: (instance) => openHistory(instance),
+		onToggleScope: () => {
+			showAll = !showAll;
+			manager.setScope(showAll);
+			refresh();
+		},
 		onQuit: quit,
 	});
 

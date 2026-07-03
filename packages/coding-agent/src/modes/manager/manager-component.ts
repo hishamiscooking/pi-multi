@@ -1,20 +1,20 @@
 /**
  * TUI component for the pim manager: live instance cards with
- * spawn / attach / kill / merge actions.
+ * spawn / attach / kill / merge actions, scoped per project.
  */
 
 import { Container, getKeybindings, Spacer, Text } from "@earendil-works/pi-tui";
-import { DynamicBorder } from "../interactive/components/dynamic-border.ts";
-import { keyHint, rawKeyHint } from "../interactive/components/keybinding-hints.ts";
-import { theme } from "../interactive/theme/theme.ts";
-import { InstanceCard } from "./instance-card.ts";
+import { InstanceGrid } from "./instance-grid.ts";
 import { formatInstanceCwd, type InstanceView } from "./instances.ts";
+import { pim } from "./pim-theme.ts";
 
 export interface ManagerCallbacks {
 	onAttach(instance: InstanceView): void;
 	onNew(): void;
 	onKill(instance: InstanceView): void;
 	onMerge(instance: InstanceView): void;
+	onHistory(instance: InstanceView): void;
+	onToggleScope(): void;
 	onQuit(): void;
 }
 
@@ -24,18 +24,19 @@ export class ManagerComponent extends Container {
 	private instances: InstanceView[] = [];
 	private selectedId: string | undefined;
 	private armed: ArmedAction;
+	private showingAll = false;
 	private readonly callbacks: ManagerCallbacks;
 	private readonly headerText: Text;
 	private readonly listContainer: Container;
+	private readonly grid = new InstanceGrid();
 	private readonly footerText: Text;
-	private readonly cwd: string;
+	private readonly projectRoot: string;
 
-	constructor(cwd: string, callbacks: ManagerCallbacks) {
+	constructor(projectRoot: string, callbacks: ManagerCallbacks) {
 		super();
 		this.callbacks = callbacks;
-		this.cwd = cwd;
+		this.projectRoot = projectRoot;
 
-		this.addChild(new DynamicBorder());
 		this.addChild(new Spacer(1));
 		this.headerText = new Text("", 1, 0);
 		this.setHeader();
@@ -49,27 +50,40 @@ export class ManagerComponent extends Container {
 		this.footerText = new Text("", 1, 0);
 		this.addChild(this.footerText);
 		this.addChild(new Spacer(1));
-		this.addChild(new DynamicBorder());
 
 		this.updateList();
 	}
 
 	private setHeader(): void {
-		const counts = {
-			working: this.instances.filter((instance) => instance.state === "working").length,
-			total: this.instances.length,
-		};
-		const summary =
-			counts.total === 0
+		const working = this.instances.filter((instance) => instance.state === "working").length;
+		const attention = this.instances.filter((instance) => instance.status?.attention).length;
+		const scope = this.showingAll ? pim.yellow("all projects") : pim.muted(formatInstanceCwd(this.projectRoot));
+		const counts =
+			this.instances.length === 0
 				? ""
-				: theme.fg(
-						"dim",
-						` · ${counts.total} instance${counts.total === 1 ? "" : "s"} · ${counts.working} working`,
-					);
-		this.headerText.setText(
-			theme.fg("accent", theme.bold("pim — agent manager")) +
-				theme.fg("dim", `  ${formatInstanceCwd(this.cwd)}`) +
-				summary,
+				: pim.sep() +
+					pim.dim(`${this.instances.length} agent${this.instances.length === 1 ? "" : "s"} · ${working} working`);
+		const needsYou =
+			attention === 0
+				? ""
+				: pim.sep() +
+					(this.instances.some((instance) => instance.status?.attention?.kind === "blocked")
+						? pim.red
+						: pim.yellow)(`${attention} need${attention === 1 ? "s" : ""} you`);
+		this.headerText.setText(`${pim.logo()}  ${scope}${counts}${needsYou}`);
+	}
+
+	setScope(showingAll: boolean): void {
+		this.showingAll = showingAll;
+		this.setHeader();
+		this.updateFooter();
+	}
+
+	/** Whether any visible instance has an animated status indicator. */
+	hasAnimatedInstances(): boolean {
+		return this.instances.some(
+			(instance) =>
+				instance.state === "working" || instance.state === "starting" || instance.status?.attention !== undefined,
 		);
 	}
 
@@ -105,48 +119,45 @@ export class ManagerComponent extends Container {
 		this.listContainer.clear();
 
 		if (this.instances.length === 0) {
-			this.listContainer.addChild(new Text(theme.fg("muted", "No agent instances. Press n to spawn one."), 1, 0));
+			this.listContainer.addChild(new Text(pim.muted("nothing running here yet"), 1, 0));
+			this.listContainer.addChild(
+				new Text(
+					pim.dim(`spawn an agent with n${this.showingAll ? "" : " · press a to see other projects"}`),
+					1,
+					0,
+				),
+			);
 			this.updateFooter();
 			return;
 		}
 
-		let first = true;
-		for (const instance of this.instances) {
-			if (!first) {
-				this.listContainer.addChild(new Spacer(1));
-			}
-			first = false;
-			this.listContainer.addChild(new InstanceCard(instance, instance.id === this.selectedId));
-		}
+		this.grid.setData(this.instances, this.selectedId);
+		this.listContainer.addChild(this.grid);
 		this.updateFooter();
 	}
 
 	private updateFooter(): void {
 		if (this.armed !== undefined) {
 			const instance = this.instances.find((entry) => entry.id === this.armed?.instanceId);
-			const action =
-				this.armed.key === "x"
-					? "kill"
-					: `merge ${instance?.worktree?.branch ?? "branch"} into ${instance?.worktree?.baseBranch ?? "base"} for`;
+			const action = this.armed.key === "x" ? "kill" : `merge ${instance?.worktree?.branch ?? "branch"} back for`;
 			this.footerText.setText(
-				theme.fg(
-					"warning",
-					`Press ${this.armed.key} again to ${action} "${instance?.name ?? this.armed.instanceId}", any other key to cancel`,
+				pim.yellow(
+					`press ${this.armed.key} again to ${action} "${instance?.name ?? this.armed.instanceId}" · any other key cancels`,
 				),
 			);
 			return;
 		}
 		const selected = this.selectedInstance();
-		const hints = [
-			rawKeyHint("n", "new"),
-			rawKeyHint("enter", "attach"),
-			rawKeyHint("↑↓", "navigate"),
-			rawKeyHint("x", "kill"),
-		];
-		if (selected?.worktree) {
-			hints.push(rawKeyHint("m", "merge"));
+		const hints = [pim.key("n", "new"), pim.key("↵", "attach"), pim.key("↑↓←→", "move")];
+		if (selected) {
+			hints.push(pim.key("h", "history"));
 		}
-		hints.push(keyHint("tui.select.cancel", "quit"));
+		hints.push(pim.key("x", "kill"));
+		if (selected?.worktree) {
+			hints.push(pim.key("m", "merge"));
+		}
+		hints.push(pim.key("a", this.showingAll ? "this project" : "all projects"));
+		hints.push(pim.key("q", "quit"));
 		this.footerText.setText(hints.join("  "));
 	}
 
@@ -166,14 +177,23 @@ export class ManagerComponent extends Container {
 		this.armed = undefined;
 
 		if (kb.matches(keyData, "tui.select.up") || keyData === "k") {
-			this.moveSelection(-1);
+			this.moveSelection(-this.grid.getCols());
 		} else if (kb.matches(keyData, "tui.select.down") || keyData === "j") {
+			this.moveSelection(this.grid.getCols());
+		} else if (kb.matches(keyData, "tui.editor.cursorLeft")) {
+			this.moveSelection(-1);
+		} else if (kb.matches(keyData, "tui.editor.cursorRight")) {
 			this.moveSelection(1);
 		} else if (kb.matches(keyData, "tui.select.confirm") || keyData === "\n") {
 			const instance = this.selectedInstance();
 			if (instance) this.callbacks.onAttach(instance);
 		} else if (keyData === "n") {
 			this.callbacks.onNew();
+		} else if (keyData === "a") {
+			this.callbacks.onToggleScope();
+		} else if (keyData === "h") {
+			const instance = this.selectedInstance();
+			if (instance) this.callbacks.onHistory(instance);
 		} else if (keyData === "x") {
 			const instance = this.selectedInstance();
 			if (instance) {

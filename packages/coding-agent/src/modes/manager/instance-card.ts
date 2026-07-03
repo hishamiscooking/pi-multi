@@ -1,19 +1,44 @@
 /**
- * Bordered live card for one pim instance: state, model, context usage,
- * token/cost totals, workspace (worktree or directory), current activity,
- * and a tail of the latest output.
+ * Live card for one pim instance, sized for a multi-column grid: tall and
+ * narrow, with a fixed-height output preview so every card in a row lines up.
+ * Shows state, model, context usage bar, token/cost totals, the branch the
+ * agent is on, its workspace path, current activity, and recent output.
  */
 
-import { type Component, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { theme } from "../interactive/theme/theme.ts";
+import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { formatInstanceCwd, type InstanceView } from "./instances.ts";
+import { pim, usageBar } from "./pim-theme.ts";
+import { INDICATORS, indicatorFrame } from "./spinners.ts";
 
-const STATE_GLYPHS: Record<InstanceView["state"], { glyph: string; color: "success" | "text" | "warning" | "dim" }> = {
-	working: { glyph: "●", color: "success" },
-	idle: { glyph: "○", color: "text" },
-	starting: { glyph: "◌", color: "warning" },
-	exited: { glyph: "✖", color: "dim" },
-};
+/** Rows of card chrome besides the preview: 2 borders + 6 info rows + divider. */
+export const CARD_CHROME_ROWS = 9;
+
+/**
+ * The 4-slot dot-matrix status indicator. Attention flags raised by the agent
+ * override everything (a red X for blocked, a drawing-in ? for question);
+ * an unseen finished response shows a pink checkmark; otherwise the state:
+ * the infinity particle while running (yellow while booting), a dotted
+ * baseline at rest, a flat line when gone.
+ */
+function statusIndicator(view: InstanceView): string {
+	const attention = view.status?.attention;
+	if (attention) {
+		return indicatorFrame(attention.kind === "blocked" ? INDICATORS.blocked : INDICATORS.question);
+	}
+	if (view.unseenDone) {
+		return INDICATORS.done;
+	}
+	switch (view.state) {
+		case "working":
+			return indicatorFrame(INDICATORS.working);
+		case "starting":
+			return indicatorFrame(INDICATORS.starting);
+		case "idle":
+			return INDICATORS.idle;
+		case "exited":
+			return INDICATORS.exited;
+	}
+}
 
 function formatAge(iso: string | undefined): string {
 	if (!iso) return "";
@@ -34,95 +59,109 @@ function formatCost(cost: number): string {
 	return cost >= 1 ? `$${cost.toFixed(2)}` : `$${cost.toFixed(3)}`;
 }
 
-export class InstanceCard implements Component {
-	private readonly view: InstanceView;
-	private readonly selected: boolean;
+/**
+ * Render one instance card at the given width, with `previewLines` rows of
+ * output preview. Plain function (not a Component): the grid renders cards
+ * itself so it can lay them out in columns.
+ */
+export function renderInstanceCard(
+	view: InstanceView,
+	selected: boolean,
+	width: number,
+	previewLines: number,
+): string[] {
+	const status = view.status;
+	const border = selected ? pim.brand : pim.border;
+	const lines: string[] = [];
 
-	constructor(view: InstanceView, selected: boolean) {
-		this.view = view;
-		this.selected = selected;
-	}
-
-	invalidate(): void {
-		// Cards are rebuilt on every refresh; nothing cached to invalidate.
-	}
-
-	private border(text: string): string {
-		return this.selected ? theme.fg("accent", text) : theme.fg("border", text);
-	}
-
-	private boxLine(content: string, width: number): string {
+	const boxLine = (left: string, right = ""): string => {
 		const innerWidth = Math.max(1, width - 4);
-		const truncated = truncateToWidth(content, innerWidth, theme.fg("dim", "…"));
-		const padding = " ".repeat(Math.max(0, innerWidth - visibleWidth(truncated)));
-		return ` ${this.border("│")} ${truncated}${padding}${this.border("│")}`;
+		const rightWidth = visibleWidth(right);
+		const leftMax = Math.max(1, innerWidth - rightWidth - (rightWidth > 0 ? 1 : 0));
+		const leftTruncated = truncateToWidth(left, leftMax, pim.dim("…"));
+		const gap = " ".repeat(Math.max(0, innerWidth - visibleWidth(leftTruncated) - rightWidth));
+		return `${border("│")} ${leftTruncated}${gap}${right} ${border("│")}`;
+	};
+
+	lines.push(border(`╭${"─".repeat(Math.max(0, width - 2))}╮`));
+
+	// Name row: ▰▱▱▱ name                [⚠ blocked | ? question | ✦ done] · age
+	const age = pim.dim(formatAge(status?.updatedAt ?? view.createdAt));
+	const attention = status?.attention;
+	const titleBadge = attention
+		? `${attention.kind === "blocked" ? pim.red("⚠ blocked") : pim.yellow("? question")} ${age}`
+		: view.unseenDone
+			? `${pim.pink("✦ done")} ${age}`
+			: age;
+	lines.push(
+		boxLine(`${statusIndicator(view)} ${selected ? pim.brandBold(view.name) : pim.textBold(view.name)}`, titleBadge),
+	);
+
+	// Model row: model                                     $cost
+	lines.push(
+		boxLine(
+			pim.muted(status?.model ?? view.model ?? "default model"),
+			status?.usage ? pim.dim(formatCost(status.usage.cost)) : "",
+		),
+	);
+
+	// Usage row: ctx bar                              ↑in ↓out
+	const ctx =
+		status?.context && status.context.percent !== null
+			? `${usageBar(status.context.percent)} ${pim.dim(`${status.context.percent.toFixed(0)}% ctx`)}`
+			: pim.dim("ctx –");
+	lines.push(
+		boxLine(
+			ctx,
+			status?.usage ? pim.dim(`↑${formatTokens(status.usage.input)} ↓${formatTokens(status.usage.output)}`) : "",
+		),
+	);
+
+	// Branch row: worktree branches in pink with their base; plain checkouts
+	// show whatever branch the agent is currently on.
+	if (view.worktree) {
+		const base = view.worktree.baseBranch ? pim.dim(` ← ${view.worktree.baseBranch}`) : "";
+		lines.push(boxLine(`${pim.pink(`⎇ ${view.liveBranch ?? view.worktree.branch}`)}${base}`));
+	} else if (view.liveBranch) {
+		lines.push(boxLine(pim.blue(`⎇ ${view.liveBranch}`)));
+	} else {
+		lines.push(boxLine(pim.dim("⎇ (no git branch)")));
 	}
 
-	render(width: number): string[] {
-		const view = this.view;
-		const { glyph, color } = STATE_GLYPHS[view.state];
-		const innerWidth = Math.max(1, width - 4);
-		const lines: string[] = [];
+	// Workspace row
+	lines.push(boxLine(pim.dim(`◆ ${formatInstanceCwd(view.worktree?.path ?? view.cwd)}`)));
 
-		// Top border with title: ╭ ● name · state · age ────╮
-		const stateText = view.state === "working" ? theme.fg("success", view.state) : theme.fg("muted", view.state);
-		const age = formatAge(view.status?.updatedAt ?? view.createdAt);
-		const title =
-			`${theme.fg(color, glyph)} ` +
-			(this.selected ? theme.fg("accent", theme.bold(view.name)) : theme.fg("text", theme.bold(view.name))) +
-			theme.fg("dim", " · ") +
-			stateText +
-			theme.fg("dim", ` · ${age} `);
-		const titleWidth = visibleWidth(title);
-		const fill = Math.max(0, innerWidth - titleWidth - 1);
-		lines.push(` ${this.border("╭─")} ${title}${this.border(`${"─".repeat(fill)}╮`)}`);
+	// Activity row: an agent-raised attention note beats everything, then the
+	// current tool while working, then the original task.
+	if (attention) {
+		const color = attention.kind === "blocked" ? pim.red : pim.yellow;
+		lines.push(boxLine(color(`${attention.kind === "blocked" ? "⚠" : "?"} ${attention.note.replaceAll("\n", " ")}`)));
+	} else if (view.state === "working" && status?.activity) {
+		lines.push(boxLine(`${pim.yellow("⚒ ")}${pim.text(status.activity)}`));
+	} else if (view.initialTask) {
+		lines.push(boxLine(pim.dim(`task: ${view.initialTask.replaceAll("\n", " ")}`)));
+	} else {
+		lines.push(boxLine(""));
+	}
 
-		// Info: model · ctx usage · tokens · cost
-		const status = view.status;
-		const infoParts: string[] = [];
-		infoParts.push(theme.fg("text", status?.model ?? view.model ?? "default model"));
-		if (status?.context && status.context.percent !== null) {
-			infoParts.push(
-				theme.fg("muted", `ctx ${status.context.percent.toFixed(1)}% of ${formatTokens(status.context.window)}`),
-			);
-		}
-		if (status?.usage) {
-			infoParts.push(
-				theme.fg("muted", `↑${formatTokens(status.usage.input)} ↓${formatTokens(status.usage.output)}`) +
-					theme.fg("dim", ` ${formatCost(status.usage.cost)}`),
-			);
-		}
-		lines.push(this.boxLine(infoParts.join(theme.fg("dim", " · ")), width));
-
-		// Workspace: worktree branch or plain directory
-		if (view.worktree) {
-			lines.push(
-				this.boxLine(
-					theme.fg("warning", `⎇ ${view.worktree.branch}`) +
-						theme.fg("dim", ` (from ${view.worktree.baseBranch}) · ${formatInstanceCwd(view.worktree.path)}`),
-					width,
-				),
-			);
+	// Fixed-height output preview (height chosen by the grid from terminal
+	// size). Source lines are wrapped to the card width so tall cards fill
+	// with text instead of truncating one row per source line.
+	lines.push(boxLine(pim.dim("┈".repeat(Math.max(1, width - 6)))));
+	const previewTextWidth = Math.max(8, width - 7);
+	const wrapped = (status?.outputTail ?? []).flatMap((line) => wrapTextWithAnsi(line, previewTextWidth));
+	const tail = wrapped.slice(-previewLines);
+	for (let i = 0; i < previewLines; i++) {
+		const line = tail[i];
+		if (line !== undefined) {
+			lines.push(boxLine(`${pim.brand("▏ ")}${pim.text(line)}`));
+		} else if (i === 0 && tail.length === 0) {
+			lines.push(boxLine(pim.dim(view.state === "exited" ? "instance exited" : "no output yet")));
 		} else {
-			lines.push(this.boxLine(theme.fg("dim", `dir ${formatInstanceCwd(view.cwd)}`), width));
+			lines.push(boxLine(""));
 		}
-
-		// Current activity while working
-		if (view.state === "working" && status?.activity) {
-			lines.push(this.boxLine(theme.fg("warning", "⚒ ") + theme.fg("text", status.activity), width));
-		}
-
-		// Output tail
-		const tail = status?.outputTail ?? [];
-		if (tail.length > 0) {
-			for (const line of tail) {
-				lines.push(this.boxLine(theme.fg("dim", "▏") + theme.fg("muted", line), width));
-			}
-		} else if (view.state !== "exited") {
-			lines.push(this.boxLine(theme.fg("dim", "no output yet"), width));
-		}
-
-		lines.push(` ${this.border(`╰${"─".repeat(Math.max(0, innerWidth + 1))}╯`)}`);
-		return lines;
 	}
+
+	lines.push(border(`╰${"─".repeat(Math.max(0, width - 2))}╯`));
+	return lines;
 }
