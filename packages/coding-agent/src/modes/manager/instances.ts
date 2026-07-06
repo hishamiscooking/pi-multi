@@ -66,6 +66,12 @@ export interface InstanceView extends InstanceRecord {
 	liveBranch?: string;
 	/** The agent finished a response the user hasn't looked at yet (attach/history clear it). */
 	unseenDone?: boolean;
+	/**
+	 * When the user wheel-scrolls a card, its preview shows this window into
+	 * the instance's scrollback instead of the live tail (set by the manager
+	 * component, not by getInstanceViews).
+	 */
+	scrollback?: { lines: string[]; fromBottom: number };
 }
 
 interface RegistryFile {

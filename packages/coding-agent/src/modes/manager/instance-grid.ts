@@ -21,6 +21,11 @@ export class InstanceGrid implements Component {
 	private views: InstanceView[] = [];
 	private selectedId: string | undefined;
 	private lastCols = 1;
+	/** Geometry of the last render, for mouse hit-testing. */
+	private lastLayout: { colWidth: number; rows: Array<{ top: number; height: number }> } = {
+		colWidth: 0,
+		rows: [],
+	};
 
 	setData(views: InstanceView[], selectedId: string | undefined): void {
 		this.views = views;
@@ -30,6 +35,22 @@ export class InstanceGrid implements Component {
 	/** Columns used by the last render; the manager uses this for ↑↓ navigation. */
 	getCols(): number {
 		return this.lastCols;
+	}
+
+	/**
+	 * Instance at a position relative to the grid's own top-left (0-based
+	 * line within the grid, 0-based terminal column), per the last render.
+	 */
+	hitTest(x: number, gridLine: number): InstanceView | undefined {
+		const { colWidth, rows } = this.lastLayout;
+		if (colWidth <= 0) return undefined;
+		const rowIndex = rows.findIndex((row) => gridLine >= row.top && gridLine < row.top + row.height);
+		if (rowIndex === -1) return undefined;
+		const col = Math.floor((x - MARGIN) / (colWidth + GAP));
+		if (col < 0 || col >= this.lastCols) return undefined;
+		const withinCol = x - MARGIN - col * (colWidth + GAP);
+		if (withinCol >= colWidth) return undefined;
+		return this.views[rowIndex * this.lastCols + col];
 	}
 
 	invalidate(): void {
@@ -62,6 +83,7 @@ export class InstanceGrid implements Component {
 		const gap = " ".repeat(GAP);
 		const blank = " ".repeat(colWidth);
 		const lines: string[] = [];
+		this.lastLayout = { colWidth, rows: [] };
 
 		for (let rowStart = 0; rowStart < this.views.length; rowStart += cols) {
 			const row = this.views.slice(rowStart, rowStart + cols);
@@ -71,6 +93,7 @@ export class InstanceGrid implements Component {
 				return card.map((line) => line + " ".repeat(Math.max(0, colWidth - visibleWidth(line))));
 			});
 			const rowHeight = Math.max(...rendered.map((card) => card.length));
+			this.lastLayout.rows.push({ top: lines.length, height: rowHeight });
 			for (let i = 0; i < rowHeight; i++) {
 				lines.push(margin + rendered.map((card) => card[i] ?? blank).join(gap));
 			}

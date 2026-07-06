@@ -632,6 +632,16 @@ export class TUI extends Container {
 		for (const overlay of this.overlayStack) overlay.component.invalidate?.();
 	}
 
+	/**
+	 * Height in lines of the last rendered content. With the terminal height,
+	 * this maps absolute screen rows to content lines (the renderer shows the
+	 * last terminal-height lines when content overflows), e.g. for mouse
+	 * coordinate hit-testing.
+	 */
+	getContentHeight(): number {
+		return this.previousLines.length;
+	}
+
 	start(): void {
 		this.stopped = false;
 		this.terminal.start(

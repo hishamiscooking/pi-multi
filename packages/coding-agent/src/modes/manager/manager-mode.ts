@@ -48,6 +48,10 @@ import { ManagerSelectComponent } from "./manager-select.ts";
 
 const REFRESH_INTERVAL_MS = 1000;
 
+/** SGR mouse reporting (press/release/wheel with coordinates). */
+const MOUSE_ENABLE = "\x1b[?1000h\x1b[?1006h";
+const MOUSE_DISABLE = "\x1b[?1006l\x1b[?1000l";
+
 function attachTerminalSize(): { cols: number; rows: number } {
 	return {
 		cols: process.stdout.columns || 220,
@@ -211,10 +215,12 @@ export async function runManagerMode(): Promise<void> {
 		if (busy || instance.state === "exited") return;
 		busy = true;
 		stopPolling();
+		process.stdout.write(MOUSE_DISABLE);
 		ui.stop();
 		await runTmuxAttach(instance.id);
 		markInstanceSeen(instance.id);
 		ui.start();
+		process.stdout.write(MOUSE_ENABLE);
 		ui.requestRender(true);
 		startPolling();
 		refresh();
@@ -353,6 +359,7 @@ export async function runManagerMode(): Promise<void> {
 
 	const quit = () => {
 		stopPolling();
+		process.stdout.write(MOUSE_DISABLE);
 		ui.stop();
 		stopThemeWatcher();
 		const running = getInstanceViews().filter((instance) => instance.state !== "exited").length;
@@ -379,12 +386,17 @@ export async function runManagerMode(): Promise<void> {
 			refresh();
 		},
 		onQuit: quit,
+		getContentHeight: () => ui.getContentHeight(),
 	});
 
 	ui.addChild(manager);
 	ui.addChild(statusLine);
 	ui.setFocus(manager);
+	// Anchor the render origin at the top of the screen so mouse rows map to
+	// content lines, then enable mouse reporting.
+	process.stdout.write("\x1b[2J\x1b[H");
 	startStartupTui(ui, settingsManager);
+	process.stdout.write(MOUSE_ENABLE);
 	refresh();
 	startPolling();
 

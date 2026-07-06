@@ -154,20 +154,31 @@ export function renderInstanceCard(
 	}
 
 	// Fixed-height output preview (height chosen by the grid from terminal
-	// size). Source lines are wrapped to the card width so tall cards fill
-	// with text instead of truncating one row per source line.
-	lines.push(boxLine(pim.dim("┈".repeat(Math.max(1, width - 6)))));
-	const previewTextWidth = Math.max(8, width - 7);
-	const wrapped = (status?.outputTail ?? []).flatMap((line) => wrapTextWithAnsi(line, previewTextWidth));
-	const tail = wrapped.slice(-previewLines);
-	for (let i = 0; i < previewLines; i++) {
-		const line = tail[i];
-		if (line !== undefined) {
-			lines.push(boxLine(`${pim.brand("▏ ")}${pim.text(line)}`));
-		} else if (i === 0 && tail.length === 0) {
-			lines.push(boxLine(pim.dim(view.state === "exited" ? "instance exited" : "no output yet")));
-		} else {
-			lines.push(boxLine(""));
+	// size). Live mode wraps the telemetry tail to the card width; when the
+	// user wheel-scrolls the card, it becomes a window into the instance's
+	// rendered scrollback instead.
+	if (view.scrollback) {
+		const { lines: history, fromBottom } = view.scrollback;
+		lines.push(boxLine(pim.yellow(`↥ scrollback −${fromBottom}`), pim.dim("wheel down for live")));
+		const end = Math.max(0, history.length - fromBottom);
+		const window = history.slice(Math.max(0, end - previewLines), end);
+		for (let i = 0; i < previewLines; i++) {
+			lines.push(boxLine(window[i] !== undefined ? `${pim.yellow("▏ ")}${window[i]}` : ""));
+		}
+	} else {
+		lines.push(boxLine(pim.dim("┈".repeat(Math.max(1, width - 6)))));
+		const previewTextWidth = Math.max(8, width - 7);
+		const wrapped = (status?.outputTail ?? []).flatMap((line) => wrapTextWithAnsi(line, previewTextWidth));
+		const tail = wrapped.slice(-previewLines);
+		for (let i = 0; i < previewLines; i++) {
+			const line = tail[i];
+			if (line !== undefined) {
+				lines.push(boxLine(`${pim.brand("▏ ")}${pim.text(line)}`));
+			} else if (i === 0 && tail.length === 0) {
+				lines.push(boxLine(pim.dim(view.state === "exited" ? "instance exited" : "no output yet")));
+			} else {
+				lines.push(boxLine(""));
+			}
 		}
 	}
 

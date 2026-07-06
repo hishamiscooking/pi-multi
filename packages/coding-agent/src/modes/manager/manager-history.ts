@@ -74,6 +74,17 @@ export class ManagerHistoryComponent implements Component {
 	}
 
 	handleInput(keyData: string): void {
+		// Mouse wheel scrolls; other mouse events are swallowed.
+		const wheelEvents = [...keyData.matchAll(/\x1b\[<(6[45]);\d+;\d+[Mm]/g)];
+		if (wheelEvents.length > 0) {
+			for (const event of wheelEvents) {
+				this.scrollTo(this.offset + (event[1] === "64" ? -3 : 3));
+			}
+			return;
+		}
+		if (/\x1b\[<\d+;\d+;\d+[Mm]/.test(keyData)) {
+			return;
+		}
 		const kb = getKeybindings();
 		if (kb.matches(keyData, "tui.select.up") || keyData === "k") {
 			this.scrollTo(this.offset - 1);

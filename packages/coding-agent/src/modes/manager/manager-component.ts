@@ -5,7 +5,7 @@
 
 import { Container, getKeybindings, Spacer, Text } from "@earendil-works/pi-tui";
 import { InstanceGrid } from "./instance-grid.ts";
-import { formatInstanceCwd, type InstanceView } from "./instances.ts";
+import { capturePaneHistory, formatInstanceCwd, type InstanceView } from "./instances.ts";
 import { pim } from "./pim-theme.ts";
 
 export interface ManagerCallbacks {
@@ -16,7 +16,14 @@ export interface ManagerCallbacks {
 	onHistory(instance: InstanceView): void;
 	onToggleScope(): void;
 	onQuit(): void;
+	/** Rendered content height of the TUI, for mapping mouse rows to content lines. */
+	getContentHeight(): number;
 }
+
+/** SGR mouse events: ESC [ < button ; col ; row (M=press/wheel, m=release). */
+const MOUSE_EVENT_RE = /\x1b\[<(\d+);(\d+);(\d+)([Mm])/g;
+const WHEEL_STEP = 3;
+const SCROLLBACK_CACHE_TTL_MS = 1500;
 
 type ArmedAction = { key: "x" | "m"; instanceId: string } | undefined;
 
@@ -25,6 +32,9 @@ export class ManagerComponent extends Container {
 	private selectedId: string | undefined;
 	private armed: ArmedAction;
 	private showingAll = false;
+	/** Per-instance scrollback offsets while the user wheel-browses a card. */
+	private readonly scrollOffsets = new Map<string, number>();
+	private readonly scrollbackCache = new Map<string, { lines: string[]; at: number }>();
 	private readonly callbacks: ManagerCallbacks;
 	private readonly headerText: Text;
 	private readonly listContainer: Container;
@@ -95,8 +105,25 @@ export class ManagerComponent extends Container {
 		if (this.armed !== undefined && !instances.some((instance) => instance.id === this.armed?.instanceId)) {
 			this.armed = undefined;
 		}
+		for (const id of this.scrollOffsets.keys()) {
+			if (!instances.some((instance) => instance.id === id)) {
+				this.scrollOffsets.delete(id);
+				this.scrollbackCache.delete(id);
+			}
+		}
 		this.setHeader();
 		this.updateList();
+	}
+
+	/** Scrollback lines for a card being wheel-browsed (briefly cached). */
+	private scrollbackFor(id: string): string[] {
+		const cached = this.scrollbackCache.get(id);
+		if (cached && Date.now() - cached.at < SCROLLBACK_CACHE_TTL_MS) {
+			return cached.lines;
+		}
+		const lines = capturePaneHistory(id) ?? [];
+		this.scrollbackCache.set(id, { lines, at: Date.now() });
+		return lines;
 	}
 
 	private selectedInstance(): InstanceView | undefined {
@@ -131,9 +158,66 @@ export class ManagerComponent extends Container {
 			return;
 		}
 
-		this.grid.setData(this.instances, this.selectedId);
+		const decorated = this.instances.map((instance) => {
+			const offset = this.scrollOffsets.get(instance.id);
+			if (!offset) return instance;
+			const lines = this.scrollbackFor(instance.id);
+			const clamped = Math.min(offset, Math.max(0, lines.length - 1));
+			return { ...instance, scrollback: { lines, fromBottom: clamped } };
+		});
+		this.grid.setData(decorated, this.selectedId);
 		this.listContainer.addChild(this.grid);
 		this.updateFooter();
+	}
+
+	/** Handle SGR mouse events; returns true when the chunk contained any. */
+	private handleMouse(data: string): boolean {
+		let handled = false;
+		MOUSE_EVENT_RE.lastIndex = 0;
+		for (const match of data.matchAll(MOUSE_EVENT_RE)) {
+			handled = true;
+			const button = Number.parseInt(match[1], 10);
+			const col = Number.parseInt(match[2], 10) - 1;
+			const row = Number.parseInt(match[3], 10) - 1;
+			const isPress = match[4] === "M";
+			// Map the screen row to a content line: the renderer shows the last
+			// terminal-height lines of the content. The grid sits below a
+			// spacer, the header (which may wrap), and another spacer.
+			const terminalRows = process.stdout.rows || 40;
+			const terminalCols = process.stdout.columns || 80;
+			const viewportTop = Math.max(0, this.callbacks.getContentHeight() - terminalRows);
+			const gridTop = 2 + this.headerText.render(terminalCols).length;
+			const gridLine = viewportTop + row - gridTop;
+			const hit = this.grid.hitTest(col, gridLine);
+			if (!hit) continue;
+
+			if (button === 64 || button === 65) {
+				// Wheel: browse the card's scrollback (up = older, down = newer).
+				const lines = this.scrollbackFor(hit.id);
+				const current = this.scrollOffsets.get(hit.id) ?? 0;
+				const next =
+					button === 64
+						? Math.min(Math.max(0, lines.length - 1), current + WHEEL_STEP)
+						: Math.max(0, current - WHEEL_STEP);
+				if (next > 0) {
+					this.scrollOffsets.set(hit.id, next);
+				} else {
+					this.scrollOffsets.delete(hit.id);
+					this.scrollbackCache.delete(hit.id);
+				}
+				this.updateList();
+			} else if (button === 0 && isPress) {
+				// Click: select; clicking the selected card attaches.
+				if (this.selectedId === hit.id) {
+					this.callbacks.onAttach(hit);
+				} else {
+					this.selectedId = hit.id;
+					this.armed = undefined;
+					this.updateList();
+				}
+			}
+		}
+		return handled;
 	}
 
 	private updateFooter(): void {
@@ -172,6 +256,9 @@ export class ManagerComponent extends Container {
 	}
 
 	handleInput(keyData: string): void {
+		if (this.handleMouse(keyData)) {
+			return;
+		}
 		const kb = getKeybindings();
 		const armedBefore = this.armed;
 		this.armed = undefined;

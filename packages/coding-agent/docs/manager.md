@@ -16,6 +16,8 @@ Instances are shown as live cards in a responsive grid: columns scale with termi
 
 The board is scoped to the current project (the git repo root, or the cwd outside a repo). Worktree instances count toward the repo they were created from.
 
+**Mouse:** the board supports the mouse — click a card to select it, click the selected card to attach, and scroll the wheel over any card to browse that instance's terminal scrollback right in its preview pane (scroll back down to return to the live tail; the wheel also scrolls the history view). While mouse reporting is on, use shift+drag for native text selection.
+
 Keys:
 
 | Key | Action |
