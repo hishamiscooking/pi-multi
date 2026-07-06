@@ -1,8 +1,10 @@
 # Multi-Instance Manager (pim)
 
-`pi manager` opens a control surface for running many pi agents at once — spawn, watch, attach, and manage instances from one board instead of one terminal tab per agent.
+`pi manager` opens a control surface for running many agents at once — spawn, watch, attach, and manage instances from one board instead of one terminal tab per agent.
 
-Requires tmux (macOS/Linux). Each instance is a full interactive pi process inside a detached tmux session on a private tmux server (socket `pim`, isolated config — your `~/.tmux.conf` is untouched). Instances keep running while the manager is closed and survive manager restarts.
+Requires tmux (macOS/Linux). Each instance is a full interactive agent process inside a detached tmux session on a private tmux server (socket `pim`, isolated config — your `~/.tmux.conf` is untouched). Instances keep running while the manager is closed and survive manager restarts.
+
+Two agent kinds are supported: **pi** (tagged `π` on cards) and **Claude Code** (tagged `✻`, requires the `claude` CLI). pi instances get full telemetry via an injected extension (context %, token/cost totals, streaming preview, the `pim_set_state` tool). Claude instances get telemetry through generated Claude Code hook settings (state, tool activity, response previews, done notifier) — and Claude's own permission/input notifications surface as question flags on the board. Pick the agent at spawn in the TUI, or `pi manager spawn --agent claude`.
 
 ## The board
 
@@ -10,7 +12,7 @@ Requires tmux (macOS/Linux). Each instance is a full interactive pi process insi
 pi manager
 ```
 
-Instances are shown as live cards in a responsive grid: columns scale with terminal width, and card height scales with terminal height so at most two rows of cards fill the screen. Each card has a dot-matrix status indicator rendered on a braille pixel grid: a particle tracing a figure-eight while working (yellow while starting), a red X slashing in when the agent flagged itself blocked, a question mark drawing in (dot blinking) when it needs an answer, a pink checkmark for a finished response you haven't seen, a dotted blue baseline at rest, and a flat line when exited. Cards also show model, a context-usage bar, cumulative token/cost totals, the branch the agent is on, its workspace path, the current tool call while working, and a streaming preview of the latest output. Attaching or opening history marks a card seen. Unnamed instances get generated adjective-noun names (e.g. `lucid-heron`).
+Instances are shown as live cards in a responsive grid: columns scale with terminal width, and card height scales with terminal height so at most two rows of cards fill the screen. Each card has a dot-matrix status indicator rendered on a braille pixel grid: a particle tracing a figure-eight while working (yellow while starting), a red X slashing in when the agent flagged itself blocked, a question mark drawing in (dot blinking) when it needs an answer, a pink checkmark for a finished response you haven't seen, a dotted blue baseline at rest, and a flat line when exited. Cards also show model, a context-usage bar, cumulative token/cost totals, output tokens-per-second of the latest response, the branch the agent is on, its workspace path, the current tool call while working, and a streaming preview of the latest output. Attaching or opening history marks a card seen. Unnamed instances get generated adjective-noun names (e.g. `lucid-heron`).
 
 The board is scoped to the current project (the git repo root, or the cwd outside a repo). Worktree instances count toward the repo they were created from.
 

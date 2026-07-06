@@ -36,6 +36,9 @@ export interface InstanceWorktree {
 	baseBranch?: string;
 }
 
+/** Which agent CLI the instance runs. Records without a kind are pi (pre-kind registry). */
+export type InstanceKind = "pi" | "claude";
+
 export interface InstanceRecord {
 	id: string;
 	name: string;
@@ -43,10 +46,15 @@ export interface InstanceRecord {
 	createdAt: string;
 	/** Project the instance belongs to: git repo root of the spawn cwd, else the cwd itself. */
 	projectRoot: string;
+	kind?: InstanceKind;
 	/** Model pattern passed to the instance at spawn, if any. */
 	model?: string;
 	initialTask?: string;
 	worktree?: InstanceWorktree;
+}
+
+export function instanceKind(record: Pick<InstanceRecord, "kind">): InstanceKind {
+	return record.kind ?? "pi";
 }
 
 export type InstanceState = "starting" | "working" | "idle" | "exited";
@@ -175,6 +183,47 @@ export function tmuxAvailable(): boolean {
 	return result.status === 0;
 }
 
+let claudeAvailableCache: boolean | undefined;
+
+/** Whether the Claude Code CLI is installed (cached for the process). */
+export function claudeAvailable(): boolean {
+	if (claudeAvailableCache === undefined) {
+		const result = spawnSync("claude", ["--version"], { encoding: "utf8" });
+		claudeAvailableCache = result.status === 0;
+	}
+	return claudeAvailableCache;
+}
+
+/**
+ * Settings file passed to Claude Code instances via --settings: routes every
+ * lifecycle hook through claude-pim-hook.mjs, which writes the same status
+ * files the pi telemetry extension does.
+ */
+function ensureClaudeHookSettings(): string {
+	const settingsPath = join(getPimDir(), "claude-hooks.json");
+	const scriptPath = join(dirname(fileURLToPath(import.meta.url)), "claude-pim-hook.mjs");
+	const hook = [
+		{ hooks: [{ type: "command", command: `${shellQuote(process.execPath)} ${shellQuote(scriptPath)}` }] },
+	];
+	const settings = {
+		hooks: {
+			SessionStart: hook,
+			UserPromptSubmit: hook,
+			PreToolUse: hook,
+			PostToolUse: hook,
+			Notification: hook,
+			Stop: hook,
+			SessionEnd: hook,
+		},
+	};
+	const content = JSON.stringify(settings, undefined, "\t");
+	mkdirSync(getPimDir(), { recursive: true });
+	if (!existsSync(settingsPath) || readFileSync(settingsPath, "utf8") !== content) {
+		writeFileSync(settingsPath, content, "utf8");
+	}
+	return settingsPath;
+}
+
 /** Arguments for attaching to an instance; spawned by the manager with stdio inherit. */
 export function tmuxAttachArgs(id: string): string[] {
 	return ["-L", TMUX_SOCKET_NAME, "-f", ensureTmuxConf(), "attach-session", "-t", tmuxSessionName(id)];
@@ -205,24 +254,44 @@ function resolveStatusExtensionPath(): string {
 }
 
 /**
- * Rebuild the command that launched this process so instances run the exact
- * same pi build (works both from sources via tsx and from dist).
+ * Build the shell command an instance's tmux session runs. pi instances
+ * re-run the exact build that launched the manager (works from sources via
+ * tsx and from dist) with the telemetry extension; Claude Code instances run
+ * the claude CLI with generated hook settings providing equivalent telemetry.
  */
 function buildInstanceCommand(record: InstanceRecord): string {
-	const nodeParts = [process.execPath, ...process.execArgv, process.argv[1]];
-	const piArgs = ["-e", resolveStatusExtensionPath(), "--name", record.name];
-	if (record.model) {
-		piArgs.push("--model", record.model);
-	}
-	if (record.initialTask) {
-		piArgs.push(record.initialTask);
+	let parts: string[];
+	if (instanceKind(record) === "claude") {
+		parts = ["claude", "--settings", ensureClaudeHookSettings()];
+		if (record.model) {
+			parts.push("--model", record.model);
+		}
+		if (record.initialTask) {
+			parts.push(record.initialTask);
+		}
+	} else {
+		parts = [
+			process.execPath,
+			...process.execArgv,
+			process.argv[1],
+			"-e",
+			resolveStatusExtensionPath(),
+			"--name",
+			record.name,
+		];
+		if (record.model) {
+			parts.push("--model", record.model);
+		}
+		if (record.initialTask) {
+			parts.push(record.initialTask);
+		}
 	}
 	const envPrefix = [
 		`PIM_STATUS_FILE=${shellQuote(getStatusFilePath(record.id))}`,
 		`PIM_LOG_FILE=${shellQuote(getLogFilePath(record.id))}`,
 		`PIM_INSTANCE_ID=${shellQuote(record.id)}`,
 	];
-	return [...envPrefix, "exec", ...[...nodeParts, ...piArgs].map(shellQuote)].join(" ");
+	return [...envPrefix, "exec", ...parts.map(shellQuote)].join(" ");
 }
 
 const repoRootCache = new Map<string, string | undefined>();
@@ -295,6 +364,7 @@ export interface SpawnInstanceOptions {
 	name?: string;
 	cwd: string;
 	initialPrompt?: string;
+	kind?: InstanceKind;
 	model?: string;
 	worktree?: WorktreeChoice;
 	cols?: number;
@@ -325,12 +395,17 @@ export function spawnInstance(options: SpawnInstanceOptions): InstanceRecord {
 	const name = options.name?.trim() || generateInstanceName(new Set(loadInstances().map((instance) => instance.name)));
 	const worktree = resolveWorktree(options, name, id);
 
+	if (options.kind === "claude" && !claudeAvailable()) {
+		throw new Error("Claude Code CLI not found. Install it first (npm install -g @anthropic-ai/claude-code).");
+	}
+
 	const record: InstanceRecord = {
 		id,
 		name,
 		cwd: worktree?.path ?? options.cwd,
 		createdAt: new Date().toISOString(),
 		projectRoot: worktree?.repoRoot ?? projectRootFor(options.cwd),
+		kind: options.kind ?? "pi",
 		model: options.model?.trim() || undefined,
 		initialTask: options.initialPrompt?.trim() || undefined,
 		worktree,

@@ -9,6 +9,8 @@ import chalk from "chalk";
 export const PIM_COLORS = {
 	brand: "#9D7CFF",
 	brandDark: "#14101F",
+	/** Anthropic clay — tags Claude Code instances on the board. */
+	claude: "#D97757",
 	pink: "#FF6AC1",
 	green: "#3FDCA0",
 	yellow: "#F2C94C",
@@ -34,6 +36,7 @@ export const pim = {
 	muted: (text: string) => chalk.hex(PIM_COLORS.muted)(text),
 	dim: (text: string) => chalk.hex(PIM_COLORS.dim)(text),
 	border: (text: string) => chalk.hex(PIM_COLORS.border)(text),
+	claude: (text: string) => chalk.hex(PIM_COLORS.claude)(text),
 	/** The " pim " logo badge. */
 	logo: () => chalk.bgHex(PIM_COLORS.brand).hex(PIM_COLORS.brandDark).bold(" pim "),
 	/** A keycap-styled key hint: [ n ] new */

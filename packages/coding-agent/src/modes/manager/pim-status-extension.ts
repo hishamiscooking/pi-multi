@@ -34,6 +34,8 @@ export interface PimStatusFile {
 	context?: { tokens: number | null; window: number; percent: number | null };
 	/** Cumulative token/cost totals across all assistant messages this process. */
 	usage?: { input: number; output: number; cost: number };
+	/** Output tokens per second of the most recent assistant message. */
+	tps?: number;
 	/** What the agent is doing right now (tool call or response streaming). */
 	activity?: string;
 	/** Tail of the most recent assistant text, for live output previews. */
@@ -98,6 +100,8 @@ export default function pimStatusExtension(pi: ExtensionAPI) {
 	let finishedAt: string | undefined;
 	let attention: PimAttention | undefined;
 	const usageTotals = { input: 0, output: 0, cost: 0 };
+	let tps: number | undefined;
+	let messageStartedAt = 0;
 	let lastStreamWrite = 0;
 
 	// The preview accumulates across the whole run. Tool-calling models emit
@@ -128,6 +132,7 @@ export default function pimStatusExtension(pi: ExtensionAPI) {
 				? { tokens: contextUsage.tokens, window: contextUsage.contextWindow, percent: contextUsage.percent }
 				: undefined,
 			usage: usageTotals.input > 0 || usageTotals.output > 0 ? { ...usageTotals } : undefined,
+			tps,
 			activity,
 			outputTail,
 			finishedAt,
@@ -173,6 +178,9 @@ export default function pimStatusExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("message_start", async (event, ctx) => {
+		if (event.message.role === "assistant") {
+			messageStartedAt = Date.now();
+		}
 		if (event.message.role === "user") {
 			// The user responded; whatever the agent was waiting on is being handled.
 			if (attention) {
@@ -213,6 +221,10 @@ export default function pimStatusExtension(pi: ExtensionAPI) {
 		usageTotals.input += usage.input + usage.cacheRead + usage.cacheWrite;
 		usageTotals.output += usage.output;
 		usageTotals.cost += usage.cost.total;
+		const elapsedMs = messageStartedAt > 0 ? Date.now() - messageStartedAt : 0;
+		if (elapsedMs > 500 && usage.output > 0) {
+			tps = usage.output / (elapsedMs / 1000);
+		}
 		const text = extractAssistantText(event.message);
 		if (text) {
 			appendRunLines(toLines(text));

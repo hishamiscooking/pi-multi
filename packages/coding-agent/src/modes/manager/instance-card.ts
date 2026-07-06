@@ -6,7 +6,7 @@
  */
 
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { formatInstanceCwd, type InstanceView } from "./instances.ts";
+import { formatInstanceCwd, type InstanceView, instanceKind } from "./instances.ts";
 import { pim, usageBar } from "./pim-theme.ts";
 import { INDICATORS, indicatorFrame } from "./spinners.ts";
 
@@ -85,7 +85,7 @@ export function renderInstanceCard(
 
 	lines.push(border(`╭${"─".repeat(Math.max(0, width - 2))}╮`));
 
-	// Name row: ▰▱▱▱ name                [⚠ blocked | ? question | ✦ done] · age
+	// Name row: <indicator> <kind tag> name   [⚠ blocked | ? question | ✦ done] · age
 	const age = pim.dim(formatAge(status?.updatedAt ?? view.createdAt));
 	const attention = status?.attention;
 	const titleBadge = attention
@@ -93,27 +93,36 @@ export function renderInstanceCard(
 		: view.unseenDone
 			? `${pim.pink("✦ done")} ${age}`
 			: age;
+	const kindTag = instanceKind(view) === "claude" ? pim.claude("✻") : pim.brand("π");
 	lines.push(
-		boxLine(`${statusIndicator(view)} ${selected ? pim.brandBold(view.name) : pim.textBold(view.name)}`, titleBadge),
+		boxLine(
+			`${statusIndicator(view)} ${kindTag} ${selected ? pim.brandBold(view.name) : pim.textBold(view.name)}`,
+			titleBadge,
+		),
 	);
 
 	// Model row: model                                     $cost
+	const fallbackModel = instanceKind(view) === "claude" ? "claude code" : "default model";
 	lines.push(
 		boxLine(
-			pim.muted(status?.model ?? view.model ?? "default model"),
+			pim.muted(status?.model ?? view.model ?? fallbackModel),
 			status?.usage ? pim.dim(formatCost(status.usage.cost)) : "",
 		),
 	);
 
-	// Usage row: ctx bar                              ↑in ↓out
+	// Usage row: ctx bar                       ↑in ↓out · tok/s
 	const ctx =
 		status?.context && status.context.percent !== null
 			? `${usageBar(status.context.percent)} ${pim.dim(`${status.context.percent.toFixed(0)}% ctx`)}`
 			: pim.dim("ctx –");
+	const throughput =
+		status?.tps !== undefined ? ` · ${status.tps >= 10 ? status.tps.toFixed(0) : status.tps.toFixed(1)} t/s` : "";
 	lines.push(
 		boxLine(
 			ctx,
-			status?.usage ? pim.dim(`↑${formatTokens(status.usage.input)} ↓${formatTokens(status.usage.output)}`) : "",
+			status?.usage
+				? pim.dim(`↑${formatTokens(status.usage.input)} ↓${formatTokens(status.usage.output)}${throughput}`)
+				: "",
 		),
 	);
 

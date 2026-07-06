@@ -340,12 +340,15 @@ function blockedFrames(): string[] {
 	);
 }
 
-/** A question mark drawing itself in, then its dot blinking. */
+/**
+ * A question mark drawing itself in, then its dot blinking. The curve keeps
+ * a left shoulder so it reads as a rounded ? rather than a 7.
+ */
 function questionFrames(): string[] {
 	const strokes: Array<[number, number]> = [
+		[2, 1],
 		[3, 0],
 		[4, 0],
-		[5, 0],
 		[5, 1],
 		[4, 2],
 	];
@@ -366,7 +369,7 @@ function questionFrames(): string[] {
 
 /** A full-slot checkmark (static — done is a state, not an activity). */
 function doneIndicatorFrame(): string {
-	const pixels: Pixel[] = [px(1, 1, 1), px(2, 2, 1), px(3, 3, 1), px(4, 2, 1), px(5, 1, 1), px(6, 0, 2)];
+	const pixels: Pixel[] = [px(2, 2, 1), px(3, 3, 1), px(4, 2, 1), px(5, 1, 1), px(6, 0, 2)];
 	return renderPixels(pixels, { bright: pink, body: pink, trail: faint });
 }
 

@@ -25,10 +25,12 @@ import { ExtensionInputComponent } from "../interactive/components/extension-inp
 import { stopThemeWatcher, theme } from "../interactive/theme/theme.ts";
 import {
 	capturePaneHistory,
+	claudeAvailable,
 	formatInstanceCwd,
 	getInstanceViews,
 	getStatusDir,
 	gitRepoRoot,
+	type InstanceKind,
 	type InstanceView,
 	listWorktrees,
 	markInstanceSeen,
@@ -229,20 +231,42 @@ export async function runManagerMode(): Promise<void> {
 			busy = false;
 		};
 
+		let kind: InstanceKind = "pi";
+		if (claudeAvailable()) {
+			const agentChoice = await promptSelect("Agent", [
+				{ value: "pi", label: "π pi", description: "full telemetry, models, pim_set_state tool" },
+				{ value: "claude", label: "✻ claude code", description: "telemetry via hooks (state, activity, preview)" },
+			]);
+			if (agentChoice === undefined) return cancel();
+			kind = agentChoice.value as InstanceKind;
+		}
+
 		const name = await promptInput("New instance — name (enter for default)");
 		if (name === undefined) return cancel();
 		const task = await promptInput("Initial task (optional, enter to skip)");
 		if (task === undefined) return cancel();
 
 		let model: string | undefined;
-		const modelItems = listAvailableModelItems();
-		if (modelItems.length > 0) {
+		if (kind === "claude") {
 			const choice = await promptSelect("Model", [
-				{ value: "", label: "(default)", description: "use pi's default model" },
-				...modelItems,
+				{ value: "", label: "(default)", description: "claude code's configured default" },
+				{ value: "fable", label: "fable", description: "Claude Fable 5" },
+				{ value: "opus", label: "opus", description: "Claude Opus" },
+				{ value: "sonnet", label: "sonnet", description: "Claude Sonnet" },
+				{ value: "haiku", label: "haiku", description: "Claude Haiku" },
 			]);
 			if (choice === undefined) return cancel();
 			model = choice.value || undefined;
+		} else {
+			const modelItems = listAvailableModelItems();
+			if (modelItems.length > 0) {
+				const choice = await promptSelect("Model", [
+					{ value: "", label: "(default)", description: "use pi's default model" },
+					...modelItems,
+				]);
+				if (choice === undefined) return cancel();
+				model = choice.value || undefined;
+			}
 		}
 
 		let worktree: WorktreeChoice | undefined;
@@ -275,6 +299,7 @@ export async function runManagerMode(): Promise<void> {
 				name,
 				cwd,
 				initialPrompt: task.trim() || undefined,
+				kind,
 				model,
 				worktree,
 				cols,
