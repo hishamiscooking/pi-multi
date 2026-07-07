@@ -334,7 +334,12 @@ export async function runManagerMode(): Promise<void> {
 	const openHistory = (instance: InstanceView) => {
 		if (busy || history) return;
 		markInstanceSeen(instance.id);
-		const component = new ManagerHistoryComponent(instance, capturePaneHistory(instance.id), closeHistory);
+		const component = new ManagerHistoryComponent(
+			instance,
+			capturePaneHistory(instance.id),
+			closeHistory,
+			manager.browsePositionFor(instance.id),
+		);
 		history = { component, instanceId: instance.id };
 		ui.removeChild(manager);
 		ui.removeChild(statusLine);

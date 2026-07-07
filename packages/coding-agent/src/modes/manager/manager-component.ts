@@ -4,6 +4,7 @@
  */
 
 import { Container, getKeybindings, Spacer, Text } from "@earendil-works/pi-tui";
+import { WheelSwipeDetector } from "./gesture.ts";
 import { InstanceGrid } from "./instance-grid.ts";
 import { capturePaneHistory, formatInstanceCwd, type InstanceView } from "./instances.ts";
 import { pim } from "./pim-theme.ts";
@@ -32,9 +33,15 @@ export class ManagerComponent extends Container {
 	private selectedId: string | undefined;
 	private armed: ArmedAction;
 	private showingAll = false;
-	/** Per-instance scrollback offsets while the user wheel-browses a card. */
-	private readonly scrollOffsets = new Map<string, number>();
+	/**
+	 * Per-instance scrollback anchors while the user wheel-browses a card:
+	 * the absolute line index just below the visible window, so appended
+	 * output never drags the view.
+	 */
+	private readonly scrollAnchors = new Map<string, number>();
 	private readonly scrollbackCache = new Map<string, { lines: string[]; at: number }>();
+	/** Two-finger swipe = back (axis-locked; see gesture.ts). */
+	private readonly swipe = new WheelSwipeDetector();
 	private readonly callbacks: ManagerCallbacks;
 	private readonly headerText: Text;
 	private readonly listContainer: Container;
@@ -105,14 +112,19 @@ export class ManagerComponent extends Container {
 		if (this.armed !== undefined && !instances.some((instance) => instance.id === this.armed?.instanceId)) {
 			this.armed = undefined;
 		}
-		for (const id of this.scrollOffsets.keys()) {
+		for (const id of this.scrollAnchors.keys()) {
 			if (!instances.some((instance) => instance.id === id)) {
-				this.scrollOffsets.delete(id);
+				this.scrollAnchors.delete(id);
 				this.scrollbackCache.delete(id);
 			}
 		}
 		this.setHeader();
 		this.updateList();
+	}
+
+	/** Where the user is browsing an instance's scrollback, if they are. */
+	browsePositionFor(id: string): number | undefined {
+		return this.scrollAnchors.get(id);
 	}
 
 	/** Scrollback lines for a card being wheel-browsed (briefly cached). */
@@ -159,11 +171,10 @@ export class ManagerComponent extends Container {
 		}
 
 		const decorated = this.instances.map((instance) => {
-			const offset = this.scrollOffsets.get(instance.id);
-			if (!offset) return instance;
+			const anchor = this.scrollAnchors.get(instance.id);
+			if (anchor === undefined) return instance;
 			const lines = this.scrollbackFor(instance.id);
-			const clamped = Math.min(offset, Math.max(0, lines.length - 1));
-			return { ...instance, scrollback: { lines, fromBottom: clamped } };
+			return { ...instance, scrollback: { lines, bottomIndex: Math.max(1, Math.min(anchor, lines.length)) } };
 		});
 		this.grid.setData(decorated, this.selectedId);
 		this.listContainer.addChild(this.grid);
@@ -180,6 +191,20 @@ export class ManagerComponent extends Container {
 			const col = Number.parseInt(match[2], 10) - 1;
 			const row = Number.parseInt(match[3], 10) - 1;
 			const isPress = match[4] === "M";
+
+			if (button >= 64 && button <= 67) {
+				const isHorizontal = button === 66 || button === 67;
+				if (this.swipe.feed(isHorizontal ? "h" : "v") && this.scrollAnchors.size > 0) {
+					// Swipe = back: snap all browsed cards to their live tail.
+					this.scrollAnchors.clear();
+					this.scrollbackCache.clear();
+					this.updateList();
+				}
+				if (isHorizontal) {
+					continue;
+				}
+			}
+
 			// Map the screen row to a content line: the renderer shows the last
 			// terminal-height lines of the content. The grid sits below a
 			// spacer, the header (which may wrap), and another spacer.
@@ -192,17 +217,15 @@ export class ManagerComponent extends Container {
 			if (!hit) continue;
 
 			if (button === 64 || button === 65) {
-				// Wheel: browse the card's scrollback (up = older, down = newer).
+				// Wheel: browse the card's scrollback. The anchor is an
+				// absolute line index, so live output never drags the view.
 				const lines = this.scrollbackFor(hit.id);
-				const current = this.scrollOffsets.get(hit.id) ?? 0;
-				const next =
-					button === 64
-						? Math.min(Math.max(0, lines.length - 1), current + WHEEL_STEP)
-						: Math.max(0, current - WHEEL_STEP);
-				if (next > 0) {
-					this.scrollOffsets.set(hit.id, next);
+				const current = this.scrollAnchors.get(hit.id) ?? lines.length;
+				const next = button === 64 ? Math.max(1, current - WHEEL_STEP) : current + WHEEL_STEP;
+				if (next < lines.length) {
+					this.scrollAnchors.set(hit.id, next);
 				} else {
-					this.scrollOffsets.delete(hit.id);
+					this.scrollAnchors.delete(hit.id);
 					this.scrollbackCache.delete(hit.id);
 				}
 				this.updateList();

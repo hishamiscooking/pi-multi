@@ -5,6 +5,7 @@
  */
 
 import { type Component, getKeybindings, truncateToWidth } from "@earendil-works/pi-tui";
+import { WheelSwipeDetector } from "./gesture.ts";
 import type { InstanceView } from "./instances.ts";
 import { pim } from "./pim-theme.ts";
 
@@ -12,15 +13,21 @@ export class ManagerHistoryComponent implements Component {
 	private lines: string[] = [];
 	private offset = 0;
 	private followBottom = true;
+	private readonly swipe = new WheelSwipeDetector();
 	private readonly viewportRows: number;
 	private readonly view: InstanceView;
 	private readonly onClose: () => void;
 
-	constructor(view: InstanceView, lines: string[] | undefined, onClose: () => void) {
+	constructor(view: InstanceView, lines: string[] | undefined, onClose: () => void, initialBottomIndex?: number) {
 		this.view = view;
 		this.onClose = onClose;
 		this.viewportRows = Math.max(10, (process.stdout.rows || 40) - 8);
 		this.setLines(lines);
+		if (initialBottomIndex !== undefined) {
+			// Open where the user was browsing the card's scrollback.
+			this.followBottom = false;
+			this.scrollTo(initialBottomIndex - this.viewportRows);
+		}
 	}
 
 	invalidate(): void {
@@ -74,11 +81,19 @@ export class ManagerHistoryComponent implements Component {
 	}
 
 	handleInput(keyData: string): void {
-		// Mouse wheel scrolls; other mouse events are swallowed.
-		const wheelEvents = [...keyData.matchAll(/\x1b\[<(6[45]);\d+;\d+[Mm]/g)];
+		// Mouse wheel scrolls; an axis-locked horizontal gesture (two-finger
+		// swipe) closes the view; other mouse events are swallowed.
+		const wheelEvents = [...keyData.matchAll(/\x1b\[<(6[4-7]);\d+;\d+[Mm]/g)];
 		if (wheelEvents.length > 0) {
 			for (const event of wheelEvents) {
-				this.scrollTo(this.offset + (event[1] === "64" ? -3 : 3));
+				const isHorizontal = event[1] === "66" || event[1] === "67";
+				if (this.swipe.feed(isHorizontal ? "h" : "v")) {
+					this.onClose();
+					return;
+				}
+				if (!isHorizontal) {
+					this.scrollTo(this.offset + (event[1] === "64" ? -3 : 3));
+				}
 			}
 			return;
 		}

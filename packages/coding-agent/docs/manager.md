@@ -16,7 +16,9 @@ Instances are shown as live cards in a responsive grid: columns scale with termi
 
 The board is scoped to the current project (the git repo root, or the cwd outside a repo). Worktree instances count toward the repo they were created from.
 
-**Mouse:** the board supports the mouse — click a card to select it, click the selected card to attach, and scroll the wheel over any card to browse that instance's terminal scrollback right in its preview pane (scroll back down to return to the live tail; the wheel also scrolls the history view). While mouse reporting is on, use shift+drag for native text selection.
+**Mouse & trackpad:** the board supports the mouse — click a card to select it, click the selected card to attach, and scroll the wheel over any card to browse that instance's terminal scrollback right in its preview pane (the view is anchored while you read, so live output never drags it; scroll back down to return to the live tail; the wheel also scrolls the history view, which opens at your card browse position). A **two-finger horizontal trackpad swipe** acts as "back" on the board and in the history view (closes history / snaps browsed cards back to live). Swipe detection is axis-locked: wheel events are grouped into gestures separated by quiet gaps, each gesture locks to the axis that dominates its first events, and only a horizontally-locked gesture fires — so the horizontal jitter riding along with vertical scrolling never triggers it. If it ever misbehaves on your hardware, run `pi manager mouse-debug`, scroll and swipe, and tune from the captured events. Inside an *attached* instance, use `ctrl+q` — tmux processes mouse events one at a time and cannot tell a swipe from jitter, so a swipe-detach binding there misfires constantly. While mouse reporting is on, use shift+drag for native text selection.
+
+Card previews render the agent's output as **markdown** (headers, bold, lists, syntax-highlighted code) using pi's renderer; mid-stream text is handled by closing any unterminated code fence before rendering. Wheel-scrolled scrollback shows the instance's own rendered terminal output.
 
 Keys:
 

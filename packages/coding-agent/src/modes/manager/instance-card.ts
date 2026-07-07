@@ -5,7 +5,8 @@
  * agent is on, its workspace path, current activity, and recent output.
  */
 
-import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { Markdown, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { getMarkdownTheme } from "../interactive/theme/theme.ts";
 import { formatInstanceCwd, type InstanceView, instanceKind } from "./instances.ts";
 import { pim, usageBar } from "./pim-theme.ts";
 import { INDICATORS, indicatorFrame } from "./spinners.ts";
@@ -57,6 +58,28 @@ function formatTokens(count: number): string {
 
 function formatCost(cost: number): string {
 	return cost >= 1 ? `$${cost.toFixed(2)}` : `$${cost.toFixed(3)}`;
+}
+
+/**
+ * Render the live output tail as markdown, safely for mid-stream text: an
+ * unterminated code fence is closed before rendering so a streaming code
+ * block doesn't swallow everything after it, and any renderer hiccup falls
+ * back to plain wrapped text.
+ */
+function renderPreviewMarkdown(tailLines: string[], width: number): string[] {
+	let text = tailLines.join("\n");
+	const fenceCount = (text.match(/^\s*```/gm) ?? []).length;
+	if (fenceCount % 2 === 1) {
+		text += "\n```";
+	}
+	try {
+		return new Markdown(text, 0, 0, getMarkdownTheme())
+			.render(width)
+			.map((line) => line.trimEnd())
+			.filter((line, index, lines) => line.length > 0 || lines[index - 1]?.length > 0);
+	} catch {
+		return tailLines.flatMap((line) => wrapTextWithAnsi(line, width));
+	}
 }
 
 /**
@@ -158,9 +181,10 @@ export function renderInstanceCard(
 	// user wheel-scrolls the card, it becomes a window into the instance's
 	// rendered scrollback instead.
 	if (view.scrollback) {
-		const { lines: history, fromBottom } = view.scrollback;
+		const { lines: history, bottomIndex } = view.scrollback;
+		const fromBottom = Math.max(0, history.length - bottomIndex);
 		lines.push(boxLine(pim.yellow(`↥ scrollback −${fromBottom}`), pim.dim("wheel down for live")));
-		const end = Math.max(0, history.length - fromBottom);
+		const end = Math.max(0, Math.min(history.length, bottomIndex));
 		const window = history.slice(Math.max(0, end - previewLines), end);
 		for (let i = 0; i < previewLines; i++) {
 			lines.push(boxLine(window[i] !== undefined ? `${pim.yellow("▏ ")}${window[i]}` : ""));
@@ -168,12 +192,12 @@ export function renderInstanceCard(
 	} else {
 		lines.push(boxLine(pim.dim("┈".repeat(Math.max(1, width - 6)))));
 		const previewTextWidth = Math.max(8, width - 7);
-		const wrapped = (status?.outputTail ?? []).flatMap((line) => wrapTextWithAnsi(line, previewTextWidth));
-		const tail = wrapped.slice(-previewLines);
+		const rendered = renderPreviewMarkdown(status?.outputTail ?? [], previewTextWidth);
+		const tail = rendered.slice(-previewLines);
 		for (let i = 0; i < previewLines; i++) {
 			const line = tail[i];
 			if (line !== undefined) {
-				lines.push(boxLine(`${pim.brand("▏ ")}${pim.text(line)}`));
+				lines.push(boxLine(`${pim.brand("▏ ")}${line}`));
 			} else if (i === 0 && tail.length === 0) {
 				lines.push(boxLine(pim.dim(view.state === "exited" ? "instance exited" : "no output yet")));
 			} else {

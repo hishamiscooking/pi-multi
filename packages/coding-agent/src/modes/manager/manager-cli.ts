@@ -35,6 +35,7 @@ import {
 	tmuxAvailable,
 	type WorktreeChoice,
 } from "./instances.ts";
+import { runMouseDebug } from "./mouse-debug.ts";
 import { runSpinnerGallery } from "./spinner-gallery.ts";
 
 const HELP = `pi manager — multi-instance agent manager
@@ -59,6 +60,7 @@ Usage:
                                       the branch checked out in the main repo
   pi manager kill <id|name>           Kill an instance (worktree is kept)
   pi manager spinners                 Browse candidate status animations (live)
+  pi manager mouse-debug              Capture raw mouse/trackpad events (gesture tuning)
 `;
 
 function fail(message: string): never {
@@ -258,6 +260,9 @@ export async function runManagerCli(args: string[]): Promise<void> {
 		}
 		case "spinners":
 			await runSpinnerGallery();
+			return;
+		case "mouse-debug":
+			await runMouseDebug();
 			return;
 		case "help":
 		case "--help":
